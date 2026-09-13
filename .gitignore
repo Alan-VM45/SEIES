@@ -66,6 +66,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+firebase-config.js
 
 # Operating system and editor files
 .DS_Store

@@ -33,11 +33,11 @@ Sistema web para la gestión de informes DAI, alumnos y coordinación.
 
 ## Configuración de Firebase
 
-La configuración web del proyecto se encuentra al inicio de `script.js`. Para usar otro proyecto, reemplaza allí los valores de Firebase y actualiza el proyecto asociado en `.firebaserc`.
+La configuración web local se encuentra en `firebase-config.js`, un archivo excluido de Git. Copia `firebase-config.example.js` como `firebase-config.js`, completa sus valores y actualiza el proyecto asociado en `.firebaserc`.
 
 La clave `apiKey` de Firebase para aplicaciones web no es una contraseña. El control de acceso debe mantenerse en Firebase Authentication y en las reglas de seguridad de Cloud Firestore; nunca publiques contraseñas, tokens privados o archivos `.env`.
 
-Los correos con permisos de coordinación se configuran en `ADMIN_EMAILS`, también en `script.js`.
+Los correos con permisos de coordinación se configuran en `adminEmails` dentro de `firebase-config.js`.
 
 ## Despliegue en Firebase Hosting
 

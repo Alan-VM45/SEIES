@@ -1,19 +1,9 @@
-// 1. CONFIGURACIÓN GLOBAL DE FIREBASE
-// Estos datos vinculan la aplicación con el proyecto de Firebase
-const __firebase_config = {
-    apiKey: "AIzaSyDP5PHWtKnanBmLVNrzri4Jg8G6A3FQREo",
-    authDomain: "dai-manager.firebaseapp.com",
-    projectId: "dai-manager",
-    storageBucket: "dai-manager.firebasestorage.app",
-    messagingSenderId: "337989080728",
-    appId: "1:337989080728:web:25c6cbf3e0d2c59aeae2ed"
-};
-
-const __app_id = 'dai-manager-pro-v34'; // ID de datos real
-const __version = 'V51'; // Versión del código
-
-// Correos electrónicos con permisos de administrador (Coordinación)
-const ADMIN_EMAILS = ['betinaman9@gmail.com', 'aaalaniz04@gmail.com', 'planillasseies2023@gmail.com'];
+// 1. CONFIGURACIÓN GLOBAL
+const appConfig = window.SEIES_CONFIG;
+const __firebase_config = appConfig?.firebase;
+const __app_id = appConfig?.appId;
+const __version = 'V51';
+const ADMIN_EMAILS = appConfig?.adminEmails || [];
 
 // Variables globales para almacenar datos en memoria
 const renderedDais = {};
