@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SEIES System</title>
+    <link rel="icon" href="img/logo.ico">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.0.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.0.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore-compat.js"></script>
+
+    <link rel="icon" href="img/logo.jpeg">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body class="text-slate-900">
+
+
+    <nav
+        class="bg-white border-b border-slate-200 px-6 py-4 flex flex-col md:flex-row justify-between items-center sticky top-0 z-50 shadow-sm gap-4 no-print">
+        <div class="flex items-center gap-3">
+            <img src="img/logo.jpeg" alt="Logo" class="w-10 h-10 rounded-xl shadow-sm border border-slate-100">
+            <h1 name="titulo" class="text-xl font-black italic uppercase tracking-tighter">SEIES</h1>
+            <p id="user-display-name" class="text-[9px] font-bold text-slate-400 uppercase tracking-widest"></p>
+            <span id="version-badge"
+                class="text-[7px] font-bold bg-slate-100 text-slate-400 px-1.5 py-0.5 rounded-full border border-slate-200 uppercase">loading...</span>
+        </div>
+
+        <div id="nav-actions" class="flex bg-slate-100 p-1.5 rounded-2xl">
+            <button onclick="switchView('dai')" id="btn-dai"
+                class="nav-btn px-5 py-2.5 rounded-xl text-[10px] font-black bg-white shadow-sm text-indigo-600">CARGA</button>
+            <button onclick="switchView('admin')" id="btn-admin"
+                class="nav-btn px-5 py-2.5 rounded-xl text-[10px] font-black text-slate-500">COORDINACIÓN</button>
+            <button onclick="switchView('monthly')" id="btn-monthly"
+                class="nav-btn px-5 py-2.5 rounded-xl text-[10px] font-black text-slate-500">MENSUAL</button>
+            <button onclick="openSettings()" id="btn-profile"
+                class="nav-btn px-4 py-2.5 rounded-xl text-[10px] font-black text-slate-500">
+                MI PERFIL
+            </button>
+            <button onclick="logout()"
+                class="px-5 py-2.5 rounded-xl text-[10px] font-black text-red-500 hover:bg-red-50 transition-colors uppercase">
+                Salir
+            </button>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto p-4 md:p-8">
+
+        <!-- VISTA DE CARGA -->
+        <section id="view-dai" class="view active">
+            <!-- PESTAÑAS DE ALUMNOS -->
+            <div id="tabs-container"
+                class="max-w-4xl mx-auto mb-4 flex items-center gap-2 overflow-x-auto no-scrollbar py-2">
+                <!-- Se llenará dinámicamente -->
+                <button onclick="addNewStudentTab()"
+                    class="p-3 bg-white rounded-xl shadow-sm border border-slate-200 text-indigo-600 hover:bg-indigo-50 transition-all shrink-0">
+                    <i data-lucide="plus" class="w-5 h-5"></i>
+                </button>
+            </div>
+
+            <div class="bg-white p-8 rounded-[2.5rem] shadow-xl border border-slate-100 max-w-4xl mx-auto">
+                <h2 id="report-title"
+                    class="text-2xl font-black mb-8 uppercase italic tracking-tighter border-l-4 border-indigo-600 pl-4">
+                    Nuevo Reporte Semanal</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <div class="relative">
+                        <input type="text" id="input-daiName" oninput="handleSuggestion('dai')"
+                            placeholder="NOMBRE DEL DAI"
+                            class="w-full p-4 bg-slate-50 rounded-2xl border-2 border-slate-100 font-bold uppercase outline-none focus:border-indigo-400">
+                        <div id="suggestions-dai" class="suggestions-container hidden"></div>
+                    </div>
+                    <div class="relative">
+                        <input type="text" id="input-studentName"
+                            oninput="handleSuggestion('student'); if(typeof renderStudentHistory === 'function') renderStudentHistory(this.value.trim().toUpperCase())"
+                            placeholder="NOMBRE DEL ALUMNO"
+                            class="w-full p-4 bg-slate-50 rounded-2xl border-2 border-slate-100 font-bold uppercase outline-none focus:border-indigo-400">
+                        <div id="suggestions-student" class="suggestions-container hidden"></div>
+                    </div>
+                    <input type="text" id="input-school" placeholder="ESCUELA"
+                        class="p-4 bg-slate-50 rounded-2xl border-2 border-slate-100 font-bold uppercase outline-none focus:border-indigo-400">
+                    <input type="text" id="input-grade" placeholder="GRADO / TURNO"
+                        class="p-4 bg-slate-50 rounded-2xl border-2 border-slate-100 font-bold uppercase outline-none focus:border-indigo-400">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-[10px] font-black uppercase text-slate-400 mb-2">Detalle de la
+                        semana:</label>
+                    <div class="flex gap-2 mb-4 overflow-x-auto pb-2">
+                        <button onclick="addToken('LUNES (HORARIO: ) ')"
+                            class="bg-slate-800 text-white px-4 py-2 rounded-lg text-[10px] font-black shrink-0">LUNES</button>
+                        <button onclick="addToken('MARTES (HORARIO: ) ')"
+                            class="bg-slate-800 text-white px-4 py-2 rounded-lg text-[10px] font-black shrink-0">MARTES</button>
+                        <button onclick="addToken('MIÉRCOLES (HORARIO: ) ')"
+                            class="bg-slate-800 text-white px-4 py-2 rounded-lg text-[10px] font-black shrink-0">MIÉRCOLES</button>
+                        <button onclick="addToken('JUEVES (HORARIO: ) ')"
+                            class="bg-slate-800 text-white px-4 py-2 rounded-lg text-[10px] font-black shrink-0">JUEVES</button>
+                        <button onclick="addToken('VIERNES (HORARIO: ) ')"
+                            class="bg-slate-800 text-white px-4 py-2 rounded-lg text-[10px] font-black shrink-0">VIERNES</button>
+                        <button onclick="addToken('\n[OBSERVACIONES: ] ')"
+                            class="bg-red-600 text-white px-4 py-2 rounded-lg text-[10px] font-black shrink-0">OBSERVACIONES</button>
+                    </div>
+                    <textarea id="input-reportText"
+                        class="w-full h-64 p-6 bg-slate-50 rounded-[2rem] border-2 border-slate-100 outline-none font-medium focus:border-indigo-400"
+                        placeholder="Escriba el detalle aquí..."></textarea>
+                    <div class="flex gap-2 mt-4">
+                        <button onclick="addToken('[AUSENTE DAI]')"
+                            class="flex-1 py-3 bg-red-600 text-white rounded-xl text-[10px] font-black uppercase hover:opacity-90">Ausente
+                            DAI</button>
+                        <button onclick="addToken('[AUSENTE ALUMNO]')"
+                            class="flex-1 py-3 bg-amber-500 text-white rounded-xl text-[10px] font-black uppercase hover:opacity-90">Ausente
+                            Alumno</button>
+                        <button onclick="addToken('[FERIADO]')"
+                            class="flex-1 py-3 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase hover:opacity-90">Feriado
+                            / Asueto</button>
+                    </div>
+                </div>
+                <div class="flex gap-4">
+                    <button onclick="saveCurrentProgress()" id="btn-save-draft"
+                        class="flex-1 py-5 bg-slate-200 text-slate-700 rounded-2xl font-black text-lg shadow-md hover:bg-slate-300 active:scale-95 transition-all">
+                        GUARDAR PROGRESO
+                    </button>
+                    <button onclick="saveReport()" id="btn-save"
+                        class="flex-[2] py-5 bg-indigo-600 text-white rounded-2xl font-black text-lg shadow-xl hover:scale-[1.01] active:scale-95 transition-all">
+                        ENVIAR A COORDINACIÓN
+                    </button>
+                </div>
+                <p id="sync-msg"
+                    class="text-center text-[10px] font-bold text-green-600 mt-4 hidden uppercase tracking-widest">
+                    Sincronizado ✓</p>
+                <p id="error-msg" class="text-center text-[10px] font-bold text-red-600 mt-4 hidden uppercase">Modo sin
+                    conexión habilitado</p>
+            </div>
+
+            <!-- HISTORIAL DEL ALUMNO ACTUAL -->
+            <div class="max-w-4xl mx-auto mt-8 bg-white p-8 rounded-[2.5rem] shadow-xl border border-slate-100 hidden"
+                id="student-history-container">
+                <h3
+                    class="text-xl font-black mb-6 uppercase italic tracking-tighter border-l-4 border-indigo-600 pl-4 text-slate-700 flex items-center justify-between">
+                    <span>Historial de Reportes</span>
+                    <span id="student-history-name" class="text-sm font-bold text-slate-400"></span>
+                </h3>
+                <div id="student-history-list" class="space-y-4 max-h-[500px] overflow-y-auto pr-2 no-scrollbar">
+                    <!-- Dinámico -->
+                </div>
+            </div>
+        </section>
+
+        <!-- COORDINACIÓN -->
+        <section id="view-admin" class="view">
+            <div class="bg-white p-8 rounded-xl shadow-2xl border-4 border-black print-container">
+                <div class="flex justify-between items-center mb-6 border-b-4 border-black pb-4 no-print">
+                    <h2 class="text-3xl font-black uppercase italic">Planilla Semanal de Coordinación</h2>
+                    <div class="flex gap-2">
+                        <button onclick="downloadWord()"
+                            class="bg-blue-700 text-white px-6 py-2 rounded-full font-black text-xs uppercase flex items-center gap-2 hover:bg-blue-800">
+                            <i data-lucide="file-text" class="w-3 h-3"></i> Descargar Word
+                        </button>
+                    </div>
+                </div>
+
+                <table id="table-to-export" class="w-full border-4 border-black">
+                    <thead class="bg-slate-900 text-white font-black text-sm uppercase italic">
+                        <tr>
+                            <th class="border-2 border-black p-4 text-left w-1/4">DAI</th>
+                            <th class="border-2 border-black p-4 text-left w-1/4">ALUMNO</th>
+                            <th class="border-2 border-black p-4 text-left">DETALLE SEMANAL</th>
+                            <th class="border-2 border-black p-4 text-center w-12 no-print">X</th>
+                        </tr>
+                    </thead>
+                    <tbody id="table-admin-body"></tbody>
+                </table>
+
+                <!-- HISTORIAL SEMANAL -->
+                <div class="mt-12 no-print border-t-4 border-slate-100 pt-8">
+                    <h3 class="text-xl font-black uppercase italic mb-6 flex items-center gap-2 text-slate-400">
+                        <i data-lucide="archive" class="w-5 h-5"></i> Reportes Semanales Anteriores
+                    </h3>
+                    <div id="admin-archives" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        <!-- Se llena dinámicamente -->
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- MENSUAL -->
+        <div id="view-monthly" class="view p-4">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold uppercase">Planilla de Asistencia Mensual</h2>
+                <button onclick="exportToExcel()"
+                    class="bg-green-600 text-white px-4 py-2 rounded shadow hover:bg-green-700">
+                    Descargar Excel
+                </button>
+            </div>
+            <div class="overflow-x-auto border border-black">
+                <table id="monthly-table" class="min-w-full bg-white text-[10px] border-collapse">
+                    <thead id="monthly-thead" class="bg-gray-100 font-bold uppercase">
+                    </thead>
+                    <tbody id="monthly-tbody">
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- HISTORIAL MENSUAL -->
+            <div class="mt-12 no-print border-t-4 border-slate-100 pt-8">
+                <h3 class="text-xl font-black uppercase italic mb-6 flex items-center gap-2 text-slate-400">
+                    <i data-lucide="calendar" class="w-5 h-5"></i> Planillas Mensuales Anteriores
+                </h3>
+                <div id="monthly-archives" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <!-- Se llena dinámicamente -->
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- NOTIFICACIONES -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- MODAL DE PERFIL -->
+    <div id="modal-profile" class="modal-backdrop" onclick="if(event.target === this) closeProfileModal()">
+        <div class="modal-content">
+            <h2 class="text-2xl font-black mb-2 uppercase italic tracking-tighter">Editar Perfil</h2>
+            <p class="text-[10px] font-bold text-amber-600 mb-6 uppercase italic">El cambio de nombre se hará una sola
+                vez una vez que haya puesto su nombre</p>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-[10px] font-black uppercase text-slate-400 mb-2">Nombre y Apellido</label>
+                    <input type="text" id="profile-name" placeholder="NOMBRE Y APELLIDO"
+                        class="w-full p-4 bg-slate-50 rounded-2xl border-2 border-slate-100 font-bold uppercase outline-none focus:border-indigo-400">
+                </div>
+                <div class="flex gap-3">
+                    <button id="btn-cancel-profile" onclick="closeProfileModal()"
+                        class="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase hover:bg-slate-200 transition-all">
+                        Cancelar
+                    </button>
+                    <button onclick="saveProfileName(event)"
+                        class="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase shadow-lg hover:scale-[1.02] active:scale-95 transition-all">
+                        Guardar
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- MODAL DE ELIMINACIÓN -->
+    <div id="modal-delete" class="modal-backdrop" onclick="if(event.target === this) closeDeleteModal()">
+        <div class="modal-content">
+            <h2 class="text-2xl font-black mb-4 uppercase italic tracking-tighter text-red-600">¿Eliminar Reporte?
+            </h2>
+            <p class="text-sm font-bold text-slate-600 mb-6 uppercase">Esta acción no se puede deshacer. El reporte
+                será borrado permanentemente.</p>
+            <input type="hidden" id="delete-report-id">
+            <div class="flex gap-3">
+                <button onclick="closeDeleteModal()"
+                    class="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase hover:bg-slate-200 transition-all">
+                    Cancelar
+                </button>
+                <button onclick="confirmDeleteReport()"
+                    class="flex-1 py-4 bg-red-600 text-white rounded-2xl font-black text-xs uppercase shadow-lg hover:scale-[1.02] active:scale-95 transition-all">
+                    Eliminar
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL DE ELIMINACIÓN DE PESTAÑA -->
+    <div id="modal-tab-delete" class="modal-backdrop" onclick="if(event.target === this) closeTabDeleteModal()">
+        <div class="modal-content">
+            <h2 class="text-2xl font-black mb-4 uppercase italic tracking-tighter text-amber-600">¿Cerrar Pestaña?</h2>
+            <p class="text-sm font-bold text-slate-600 mb-6 uppercase">El borrador de este alumno se eliminará
+                permanentemente.</p>
+            <input type="hidden" id="delete-tab-id">
+            <div class="flex gap-3">
+                <button onclick="closeTabDeleteModal()"
+                    class="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase hover:bg-slate-200 transition-all">
+                    Cancelar
+                </button>
+                <button onclick="confirmRemoveTab()"
+                    class="flex-1 py-4 bg-amber-600 text-white rounded-2xl font-black text-xs uppercase shadow-lg hover:scale-[1.02] active:scale-95 transition-all">
+                    Confirmar
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js?v=51"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+</body>
+
+</html>
