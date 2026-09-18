@@ -2,21 +2,26 @@
 const appConfig = window.SEIES_CONFIG;
 const __firebase_config = appConfig?.firebase;
 const __app_id = appConfig?.appId;
-const __version = 'V56';
+const __version = 'V62';
 const ADMIN_EMAILS = appConfig?.adminEmails || [];
 
 // Variables globales para almacenar datos en memoria
 const renderedDais = {};
-let reports = [], masterAlumnos = [], masterDais = [];
+let reports = [], draftReports = [], masterAlumnos = [], masterDais = [];
 let db; // Instancia de Firestore
 let currentUserEmail = null;
 let currentTabs = []; // Pestañas de alumnos abiertas
 let activeTabId = null; // ID de la pestaña que se está editando
 let profileLoaded = false;
 const closedTabIds = new Set();
+let lastDraftSaveError = null;
 
 function normalizeText(value) {
     return String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
+}
+
+function normalizeSearchText(value) {
+    return normalizeText(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
 function normalizeTimestamp(value, fallbackId = "") {
@@ -38,10 +43,10 @@ function normalizeReport(data, id = "") {
         id,
         ...data,
         daiName: normalizeText(data.daiName || data.dai || data.nombreDai),
-        studentName: normalizeText(data.studentName || data.alumno || data.nombreAlumno || data.student),
+        studentName: normalizeText(data.studentName || data.alumno || data.nombreAlumno || data.alumnoNombre || data.student || data.nombre),
         school: normalizeText(data.school || data.escuela),
         grade: normalizeText(data.grade || data.grado || data.turno),
-        reportText: data.reportText || data.detalle || data.detail || data.description || "",
+        reportText: data.reportText || data.detalle || data.detail || data.description || data.detalleSemanal || data.detalleSemana || data.texto || data.observaciones || "",
         timestamp: normalizeTimestamp(data.timestamp || data.createdAt || data.fecha || 0, id)
     };
 }
@@ -155,6 +160,10 @@ function initializeApp() {
 
     // Configura el guardado automático cuando se escribe en los campos de texto
     const triggerAutoSave = () => {
+        if (activeTabId && !currentTabs.some(tab => tab.id === activeTabId)) {
+            activeTabId = null;
+        }
+
         if (!activeTabId) {
             const hasDraftInput = [
                 document.getElementById('input-studentName').value,
@@ -285,9 +294,11 @@ function subscribeData() {
         let tabsChanged = false;
 
         // FILTRO INTELIGENTE: Los reportes reales se actualizan por lote
-        reports = snap.docs
+        const normalizedReports = snap.docs
             .map(doc => normalizeReport(doc.data(), doc.id))
-            .filter(d => !d.isProfile && !d.isDraft);
+            .filter(d => !d.isProfile);
+        reports = normalizedReports.filter(d => !d.isDraft);
+        draftReports = normalizedReports.filter(d => d.isDraft && d.userEmail === currentUserEmail);
 
         snap.docChanges().forEach(change => {
             const data = change.doc.data();
@@ -486,8 +497,22 @@ function renderStudentHistory(studentName) {
     }
 
     const normalizedStudentName = normalizeText(studentName);
-    const studentReports = reports.filter(r => normalizeText(r.studentName) === normalizedStudentName)
-        .sort((a, b) => b.timestamp - a.timestamp);
+    const searchStudentName = normalizeSearchText(studentName);
+    const matchesStudent = report => {
+        const reportName = normalizeSearchText(report.studentName);
+        return reportName === searchStudentName || reportName.includes(searchStudentName) || searchStudentName.includes(reportName);
+    };
+    const finalReports = reports.filter(matchesStudent);
+    const studentReports = [
+        ...finalReports,
+        ...draftReports.filter(draft => {
+            if (!matchesStudent(draft)) return false;
+            if (!String(draft.reportText || '').trim()) return false;
+            return !finalReports.some(report =>
+                normalizeText(report.reportText) === normalizeText(draft.reportText)
+            );
+        })
+    ].sort((a, b) => b.timestamp - a.timestamp);
 
     if (studentReports.length === 0) {
         container.classList.add('hidden');
@@ -505,10 +530,11 @@ function renderStudentHistory(studentName) {
             day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
         });
 
+        const statusLabel = r.isDraft ? 'BORRADOR' : 'ENVIADO';
         return `
             <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
                 <div class="flex justify-between items-center mb-2">
-                    <span class="text-[10px] font-black uppercase text-indigo-600 tracking-widest">${dateStr}</span>
+                    <span class="text-[10px] font-black uppercase text-indigo-600 tracking-widest">${dateStr} · ${statusLabel}</span>
                 </div>
                 <div class="text-xs font-medium leading-relaxed whitespace-pre-wrap text-slate-700">${formattedText}</div>
             </div>
@@ -532,7 +558,8 @@ function handleSuggestion(type) {
     if (val.length < 1) { box.classList.add('hidden'); return; }
 
     const list = type === 'student' ? masterAlumnos : masterDais;
-    const filtered = list.filter(item => item.nombre.includes(val));
+    const searchValue = normalizeSearchText(val);
+    const filtered = list.filter(item => normalizeSearchText(item.nombre).includes(searchValue));
 
     if (filtered.length > 0) {
         box.innerHTML = filtered.map(item => `
@@ -1055,6 +1082,18 @@ async function deleteReport(id) {
     }
 }
 
+async function saveStudentMasterRecord(tab) {
+    if (!tab?.studentName) return;
+
+    const root = getDataRoot();
+    const studentId = tab.studentName.replace(/\s+/g, '_');
+    await root.collection('master_alumnos').doc(studentId).set({
+        nombre: tab.studentName,
+        school: tab.school || "",
+        grade: tab.grade || ""
+    }, { merge: true });
+}
+
 function triggerDeleteReport(id) {
     const modal = document.getElementById('modal-delete');
     const input = document.getElementById('delete-report-id');
@@ -1261,6 +1300,12 @@ async function loadTabsFromFirestore() {
             tab.reportText
         ].some(value => String(value || '').trim()) && !closedTabIds.has(tab.id));
         activeTabId = localActive;
+        if (!currentTabs.some(tab => tab.id === activeTabId)) {
+            activeTabId = currentTabs[0]?.id || null;
+        }
+        if (!activeTabId) {
+            localStorage.removeItem(`dai_active_tab_${currentUserEmail}`);
+        }
         localStorage.setItem(`dai_tabs_${currentUserEmail}`, JSON.stringify(currentTabs));
         renderTabs();
         if (activeTabId) switchTab(activeTabId);
@@ -1415,11 +1460,11 @@ async function confirmRemoveTab() {
 // Guarda un borrador de la pestaña actual en el almacenamiento local y en la nube (Firestore)
 async function saveTabDraft(tabId) {
     const email = (currentUserEmail || (firebase.auth().currentUser ? firebase.auth().currentUser.email : null) || "").toLowerCase();
-    if (!email || closedTabIds.has(tabId)) return;
+    if (!email || closedTabIds.has(tabId)) return false;
     currentUserEmail = email;
 
     const tab = currentTabs.find(t => t.id === tabId);
-    if (!tab) return;
+    if (!tab) return false;
 
     // Si es la pestaña activa, actualiza el objeto tab con lo que hay escrito en los inputs
     if (tabId === activeTabId) {
@@ -1445,14 +1490,14 @@ async function saveTabDraft(tabId) {
 
     if (!shouldSync) {
         console.log("Pestaña vacía, solo guardado local");
-        return;
+        return true;
     }
 
     try {
         const root = getDataRoot();
         const docId = `DRAFT_${currentUserEmail}_${tabId}`.replace(/[@.]/g, '_');
 
-        if (closedTabIds.has(tabId)) return;
+        if (closedTabIds.has(tabId)) return false;
 
         await root.collection('reports').doc(docId).set({
             ...tab,
@@ -1475,7 +1520,11 @@ async function saveTabDraft(tabId) {
         }
     } catch (e) {
         console.error("Error guardando borrador en Firebase (V38):", e);
+        lastDraftSaveError = e;
+        return false;
     }
+
+    return true;
 }
 
 // Función que se activa manualmente con el botón "GUARDAR PROGRESO"
@@ -1491,7 +1540,18 @@ async function saveCurrentProgress() {
             btn.disabled = true;
             btn.innerText = "GUARDANDO...";
         }
-        await saveTabDraft(activeTabId);
+        const saved = await saveTabDraft(activeTabId);
+        if (!saved) {
+            const errorCode = lastDraftSaveError?.code || "unknown-error";
+            const errorMessage = lastDraftSaveError?.message || "No se pudo escribir el borrador.";
+            throw new Error(`${errorCode}: ${errorMessage}`);
+        }
+        const currentTab = currentTabs.find(tab => tab.id === activeTabId);
+        try {
+            await saveStudentMasterRecord(currentTab);
+        } catch (masterErr) {
+            console.warn("No se pudo actualizar la lista de alumnos:", masterErr);
+        }
         showNotification("Progreso guardado correctamente");
     } catch (err) {
         showNotification("Error al guardar progreso: " + err.message, "error");

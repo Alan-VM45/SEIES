@@ -1,0 +1,47 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.email in [
+        'betinaman9@gmail.com',
+        'aaalaniz04@gmail.com',
+        'planillasseies2023@gmail.com'
+      ];
+    }
+
+    function ownsNewData() {
+      return signedIn()
+        && request.resource.data.userEmail == request.auth.token.email;
+    }
+
+    function ownsExistingData() {
+      return signedIn()
+        && resource.data.userEmail == request.auth.token.email;
+    }
+
+    match /artifacts/{appId}/public/data/reports/{reportId} {
+      allow read: if signedIn();
+      allow create: if ownsNewData();
+      allow update: if ownsNewData() || isAdmin();
+      allow delete: if isAdmin() || (ownsExistingData() && resource.data.isDraft == true);
+    }
+
+    match /artifacts/{appId}/public/data/master_alumnos/{studentId} {
+      allow read, write: if signedIn();
+    }
+
+    match /artifacts/{appId}/public/data/master_dais/{daiId} {
+      allow read, write: if signedIn();
+    }
+
+    match /artifacts/{appId}/public/data/user_profiles/{userEmail} {
+      allow read: if signedIn();
+      allow write: if signedIn() && userEmail == request.auth.token.email;
+    }
+  }
+}
