@@ -2,7 +2,7 @@
 const appConfig = window.SEIES_CONFIG;
 const __firebase_config = appConfig?.firebase;
 const __app_id = appConfig?.appId;
-const __version = 'V51';
+const __version = 'V56';
 const ADMIN_EMAILS = appConfig?.adminEmails || [];
 
 // Variables globales para almacenar datos en memoria
@@ -13,6 +13,63 @@ let currentUserEmail = null;
 let currentTabs = []; // Pestañas de alumnos abiertas
 let activeTabId = null; // ID de la pestaña que se está editando
 let profileLoaded = false;
+const closedTabIds = new Set();
+
+function normalizeText(value) {
+    return String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
+}
+
+function normalizeTimestamp(value, fallbackId = "") {
+    if (value && typeof value.toMillis === "function") return value.toMillis();
+    const numericValue = Number(value);
+    if (Number.isFinite(numericValue) && numericValue > 0) return numericValue;
+    if (value) {
+        const parsedValue = Date.parse(value);
+        if (Number.isFinite(parsedValue)) return parsedValue;
+    }
+
+    // Los reportes antiguos guardaban el timestamp al final del ID.
+    const idTimestamp = String(fallbackId).match(/(\d{13})$/)?.[1];
+    return idTimestamp ? Number(idTimestamp) : 0;
+}
+
+function normalizeReport(data, id = "") {
+    return {
+        id,
+        ...data,
+        daiName: normalizeText(data.daiName || data.dai || data.nombreDai),
+        studentName: normalizeText(data.studentName || data.alumno || data.nombreAlumno || data.student),
+        school: normalizeText(data.school || data.escuela),
+        grade: normalizeText(data.grade || data.grado || data.turno),
+        reportText: data.reportText || data.detalle || data.detail || data.description || "",
+        timestamp: normalizeTimestamp(data.timestamp || data.createdAt || data.fecha || 0, id)
+    };
+}
+
+function findMasterStudent(studentName) {
+    const normalizedName = normalizeText(studentName);
+    return masterAlumnos.find(item => normalizeText(item.nombre || item.studentName || item.alumno) === normalizedName);
+}
+
+function hydrateActiveStudentData() {
+    if (!activeTabId) return;
+
+    const tab = currentTabs.find(item => item.id === activeTabId);
+    const masterStudent = tab && findMasterStudent(tab.studentName);
+    if (!tab || !masterStudent) return;
+
+    tab.studentName = normalizeText(tab.studentName || masterStudent.nombre);
+    tab.school = tab.school || masterStudent.school || "";
+    tab.grade = tab.grade || masterStudent.grade || "";
+
+    const schoolInput = document.getElementById('input-school');
+    const gradeInput = document.getElementById('input-grade');
+    if (schoolInput && !schoolInput.value) schoolInput.value = tab.school;
+    if (gradeInput && !gradeInput.value) gradeInput.value = tab.grade;
+
+    localStorage.setItem(`dai_tabs_${currentUserEmail}`, JSON.stringify(currentTabs));
+    renderTabs();
+}
 
 
 // 2. INICIALIZACIÓN Y ACCESO A DATOS
@@ -99,6 +156,15 @@ function initializeApp() {
     // Configura el guardado automático cuando se escribe en los campos de texto
     const triggerAutoSave = () => {
         if (!activeTabId) {
+            const hasDraftInput = [
+                document.getElementById('input-studentName').value,
+                document.getElementById('input-school').value,
+                document.getElementById('input-grade').value,
+                document.getElementById('input-reportText').value
+            ].some(value => value.trim());
+
+            if (!hasDraftInput) return;
+
             const tabId = 'tab_' + Date.now();
             const newTab = {
                 id: tabId,
@@ -179,6 +245,11 @@ function showLoginError(text) {
 
 // Cambia la pestaña activa del dashboard (Carga, Coordinación, etc.)
 function switchView(viewId) {
+    const esAdmin = currentUserEmail && ADMIN_EMAILS.includes(currentUserEmail);
+    if ((viewId === 'admin' || viewId === 'monthly') && !esAdmin) {
+        viewId = 'dai';
+    }
+
     // Oculta todas las vistas
     document.querySelectorAll('.view').forEach(view => {
         view.style.display = 'none';
@@ -215,7 +286,7 @@ function subscribeData() {
 
         // FILTRO INTELIGENTE: Los reportes reales se actualizan por lote
         reports = snap.docs
-            .map(doc => ({ id: doc.id, ...doc.data() }))
+            .map(doc => normalizeReport(doc.data(), doc.id))
             .filter(d => !d.isProfile && !d.isDraft);
 
         snap.docChanges().forEach(change => {
@@ -237,6 +308,8 @@ function subscribeData() {
 
             // 2. SINCRONIZACIÓN DE PESTAÑAS (Sync Granular V44)
             if (data.isDraft && data.userEmail === currentUserEmail) {
+                if (closedTabIds.has(data.tabId)) return;
+
                 // EXTERMINADOR DE ZOMBIES V44: Borramos formatos viejos O nombres placeholders
                 const isPlaceholder = data.studentName === "NUEVO_ALUMNO" || data.studentName === "NUEVO ALUMNO";
                 if (!docId.startsWith('DRAFT_') || isPlaceholder) {
@@ -300,16 +373,31 @@ function subscribeData() {
                 renderStudentHistory(currentSelected.studentName);
             }
         }
-    }, err => console.error("Error V40 Sync:", err));
+    }, err => {
+        console.error("Error V40 Sync:", err);
+        showNotification("No se pudo cargar la planilla. Revisa tu conexión o permisos.", "error");
+    });
 
     // Escucha cambios en la lista maestra de alumnos
     root.collection('master_alumnos').onSnapshot(snap => {
-        masterAlumnos = snap.docs.map(doc => doc.data());
+        masterAlumnos = snap.docs.map(doc => {
+            const data = doc.data();
+            return {
+                ...data,
+                nombre: normalizeText(data.nombre || data.studentName || data.alumno),
+                school: normalizeText(data.school || data.escuela),
+                grade: normalizeText(data.grade || data.grado || data.turno)
+            };
+        });
+        hydrateActiveStudentData();
     }, err => console.warn("Error en Alumnos:", err));
 
     // Escucha cambios en la lista maestra de DAIs
     root.collection('master_dais').onSnapshot(snap => {
-        masterDais = snap.docs.map(doc => doc.data());
+        masterDais = snap.docs.map(doc => ({
+            ...doc.data(),
+            nombre: normalizeText(doc.data().nombre || doc.data().daiName || doc.data().dai)
+        }));
     }, err => console.warn("Error en DAIs:", err));
 }
 
@@ -397,17 +485,16 @@ function renderStudentHistory(studentName) {
         return;
     }
 
-    const studentReports = reports.filter(r =>
-        r.studentName === studentName &&
-        (r.userEmail === currentUserEmail || ADMIN_EMAILS.includes(currentUserEmail))
-    ).sort((a, b) => b.timestamp - a.timestamp);
+    const normalizedStudentName = normalizeText(studentName);
+    const studentReports = reports.filter(r => normalizeText(r.studentName) === normalizedStudentName)
+        .sort((a, b) => b.timestamp - a.timestamp);
 
     if (studentReports.length === 0) {
         container.classList.add('hidden');
         return;
     }
 
-    nameLabel.innerText = studentName;
+    nameLabel.innerText = normalizedStudentName;
     list.innerHTML = studentReports.map(r => {
         let formattedText = (r.reportText || "")
             .replace(/(LUNES|MARTES|MIÉRCOLES|JUEVES|VIERNES|SÁBADO|DOMINGO)([^:]*:)/gi, '<strong>$1$2</strong>')
@@ -1162,10 +1249,19 @@ async function loadTabsFromFirestore() {
     // Intento de carga local inmediata para una respuesta rápida en la interfaz (UX)
     const localTabs = localStorage.getItem(`dai_tabs_${currentUserEmail}`);
     const localActive = localStorage.getItem(`dai_active_tab_${currentUserEmail}`);
+    const savedClosedTabs = JSON.parse(localStorage.getItem(`dai_closed_tabs_${currentUserEmail}`) || '[]');
+    savedClosedTabs.forEach(tabId => closedTabIds.add(tabId));
 
     if (localTabs) {
-        currentTabs = JSON.parse(localTabs);
+        const savedTabs = JSON.parse(localTabs);
+        currentTabs = savedTabs.filter(tab => [
+            tab.studentName,
+            tab.school,
+            tab.grade,
+            tab.reportText
+        ].some(value => String(value || '').trim()) && !closedTabIds.has(tab.id));
         activeTabId = localActive;
+        localStorage.setItem(`dai_tabs_${currentUserEmail}`, JSON.stringify(currentTabs));
         renderTabs();
         if (activeTabId) switchTab(activeTabId);
         else if (currentTabs.length > 0) switchTab(currentTabs[0].id);
@@ -1218,6 +1314,7 @@ function renderTabs() {
 
 function clearReportForm() {
     activeTabId = null;
+    localStorage.removeItem(`dai_active_tab_${currentUserEmail}`);
     currentTabs.forEach(t => {
         const el = document.getElementById(t.id);
         if (el) el.classList.remove('active');
@@ -1290,6 +1387,9 @@ async function confirmRemoveTab() {
     const tabId = document.getElementById('delete-tab-id').value;
     if (!tabId) return;
 
+    closedTabIds.add(tabId);
+    localStorage.setItem(`dai_closed_tabs_${currentUserEmail}`, JSON.stringify([...closedTabIds]));
+
     // Actualiza la interfaz inmediatamente (Optimistic UI)
     currentTabs = currentTabs.filter(t => t.id !== tabId);
     if (activeTabId === tabId) {
@@ -1315,7 +1415,7 @@ async function confirmRemoveTab() {
 // Guarda un borrador de la pestaña actual en el almacenamiento local y en la nube (Firestore)
 async function saveTabDraft(tabId) {
     const email = (currentUserEmail || (firebase.auth().currentUser ? firebase.auth().currentUser.email : null) || "").toLowerCase();
-    if (!email) return;
+    if (!email || closedTabIds.has(tabId)) return;
     currentUserEmail = email;
 
     const tab = currentTabs.find(t => t.id === tabId);
@@ -1351,6 +1451,8 @@ async function saveTabDraft(tabId) {
     try {
         const root = getDataRoot();
         const docId = `DRAFT_${currentUserEmail}_${tabId}`.replace(/[@.]/g, '_');
+
+        if (closedTabIds.has(tabId)) return;
 
         await root.collection('reports').doc(docId).set({
             ...tab,
