@@ -32,11 +32,17 @@ service cloud.firestore {
     }
 
     match /artifacts/{appId}/public/data/master_alumnos/{studentId} {
-      allow read, write: if signedIn();
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && !request.resource.data.keys().hasAny(['assignedDaiEmail', 'daiEmail']);
+      allow update: if isAdmin()
+        || (signedIn()
+          && request.resource.data.assignedDaiEmail == resource.data.assignedDaiEmail);
     }
 
     match /artifacts/{appId}/public/data/master_dais/{daiId} {
-      allow read, write: if signedIn();
+      allow read: if signedIn();
+      allow create, update: if signedIn();
     }
 
     match /artifacts/{appId}/public/data/user_profiles/{userEmail} {

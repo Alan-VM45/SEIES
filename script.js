@@ -2,19 +2,26 @@
 const appConfig = window.SEIES_CONFIG;
 const __firebase_config = appConfig?.firebase;
 const __app_id = appConfig?.appId;
-const __version = 'V62';
+const __version = 'V72';
 const ADMIN_EMAILS = appConfig?.adminEmails || [];
 
 // Variables globales para almacenar datos en memoria
 const renderedDais = {};
 let reports = [], draftReports = [], masterAlumnos = [], masterDais = [];
+let daiDirectory = [];
 let db; // Instancia de Firestore
 let currentUserEmail = null;
 let currentTabs = []; // Pestañas de alumnos abiertas
 let activeTabId = null; // ID de la pestaña que se está editando
 let profileLoaded = false;
 const closedTabIds = new Set();
+const closedStudentNames = new Set();
 let lastDraftSaveError = null;
+let draftSaveTimer = null;
+const savedDraftSignatures = new Map();
+let dataSubscriptionStarted = false;
+let firestoreQuotaBlockedUntil = 0;
+let coordinationSearchText = '';
 
 function normalizeText(value) {
     return String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
@@ -22,6 +29,215 @@ function normalizeText(value) {
 
 function normalizeSearchText(value) {
     return normalizeText(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function isAdminUser() {
+    return Boolean(currentUserEmail && ADMIN_EMAILS.includes(currentUserEmail));
+}
+
+function isStudentAssignedToCurrentUser(student) {
+    if (isAdminUser()) return true;
+    const assignedEmail = String(student?.assignedDaiEmail || student?.daiEmail || '').toLowerCase();
+    return assignedEmail === currentUserEmail;
+}
+
+function getAssignedStudents() {
+    return masterAlumnos.filter(isStudentAssignedToCurrentUser);
+}
+
+function getAccessibleStudents() {
+    return isAdminUser()
+        ? masterAlumnos
+        : getAssignedStudents().filter(student =>
+            !closedTabIds.has(`assigned_${student.id}`)
+            && !closedStudentNames.has(normalizeSearchText(student.nombre))
+        );
+}
+
+function buildDaiDirectory() {
+    const directory = new Map();
+    masterDais.forEach(dai => {
+        const email = String(dai.email || dai.userEmail || '').toLowerCase();
+        if (email) directory.set(email, { email, name: dai.nombre || email });
+    });
+    reports.forEach(report => {
+        const email = String(report.userEmail || '').toLowerCase();
+        if (email && !isAdminUser() && email === currentUserEmail) {
+            directory.set(email, { email, name: report.daiName || email });
+        } else if (email && !directory.has(email)) {
+            directory.set(email, { email, name: report.daiName || email });
+        }
+    });
+    daiDirectory = [...directory.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function syncAssignedStudentTabs() {
+    if (isAdminUser()) return;
+
+    const assigned = getAssignedStudents();
+    const assignedNames = new Set(assigned.map(student => normalizeSearchText(student.nombre)));
+    currentTabs = currentTabs.filter(tab =>
+        assignedNames.has(normalizeSearchText(tab.studentName))
+        && !closedStudentNames.has(normalizeSearchText(tab.studentName))
+    );
+
+    assigned.forEach(student => {
+        const assignedTabId = `assigned_${student.id}`;
+        if (closedTabIds.has(assignedTabId) || closedStudentNames.has(normalizeSearchText(student.nombre))) return;
+        const existingTab = currentTabs.find(tab => normalizeSearchText(tab.studentName) === normalizeSearchText(student.nombre));
+        if (!existingTab) {
+            currentTabs.push({
+            id: assignedTabId,
+                studentName: student.nombre,
+                school: student.school || '',
+                grade: student.grade || '',
+                reportText: '',
+                lastUpdated: Date.now()
+            });
+        }
+    });
+
+    localStorage.setItem(`dai_tabs_${currentUserEmail}`, JSON.stringify(currentTabs));
+    if (activeTabId && !currentTabs.some(tab => tab.id === activeTabId)) activeTabId = null;
+    if (!activeTabId && currentTabs.length) activeTabId = currentTabs[0].id;
+    renderTabs();
+    if (activeTabId) switchTab(activeTabId);
+    renderHistoryOptions();
+}
+
+async function saveStudentAssignment(studentId, daiEmail) {
+    if (!isAdminUser()) return;
+    const student = masterAlumnos.find(item => item.id === studentId);
+    if (!student) return;
+
+    try {
+        await getDataRoot().collection('master_alumnos').doc(studentId).set({
+            assignedDaiEmail: String(daiEmail || '').toLowerCase()
+        }, { merge: true });
+        showNotification(daiEmail ? 'Alumno asignado correctamente' : 'Asignación quitada');
+    } catch (error) {
+        showNotification(`Error al guardar asignación: ${error.code || error.message}`, 'error');
+    }
+}
+
+function renderStudentAssignments() {
+    const container = document.getElementById('student-assignments');
+    if (!container || !isAdminUser()) return;
+
+    const options = daiDirectory.map(dai =>
+        `<option value="${dai.email}">${dai.name} (${dai.email})</option>`
+    ).join('');
+    container.innerHTML = masterAlumnos.length ? masterAlumnos.map(student => `
+        <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div>
+                <div class="text-xs font-black uppercase text-slate-700">${student.nombre}</div>
+                <div class="text-[10px] uppercase text-slate-400">${student.school || 'Sin escuela'} · ${student.grade || 'Sin grado'}</div>
+            </div>
+            <select id="assignment-${student.id}" data-student-id="${student.id}" class="p-2 rounded-lg border border-slate-200 text-xs font-bold bg-white">
+                <option value="">Sin asignar</option>
+                ${options.replace(`value="${student.assignedDaiEmail}"`, `value="${student.assignedDaiEmail}" selected`)}
+            </select>
+        </div>
+    `).join('') : '<p class="text-xs text-slate-400">Todavía no hay alumnos registrados.</p>';
+}
+
+async function saveAllStudentAssignments() {
+    if (!isAdminUser()) return;
+
+    const changes = masterAlumnos.map(student => {
+        const select = document.getElementById(`assignment-${student.id}`);
+        const assignedDaiEmail = String(select?.value || '').toLowerCase();
+        const previousAssignment = String(student.assignedDaiEmail || '').toLowerCase();
+        return assignedDaiEmail === previousAssignment ? null : { student, assignedDaiEmail };
+    }).filter(Boolean);
+
+    if (!changes.length) {
+        showNotification('No hay cambios para guardar');
+        return;
+    }
+
+    try {
+        const root = getDataRoot();
+        const batch = db.batch();
+        changes.forEach(({ student, assignedDaiEmail }) => {
+            batch.set(root.collection('master_alumnos').doc(student.id), { assignedDaiEmail }, { merge: true });
+        });
+        await batch.commit();
+        showNotification(`${changes.length} asignación(es) guardada(s)`);
+    } catch (error) {
+        showNotification(`Error al guardar asignaciones: ${error.code || error.message}`, 'error');
+    }
+}
+
+function renderAdminStudentOptions() {
+    const select = document.getElementById('admin-student-history-select');
+    if (!select || !isAdminUser()) return;
+
+    const selectedValue = select.value;
+    select.innerHTML = '<option value="">Seleccionar alumno</option>' + masterAlumnos
+        .sort((a, b) => a.nombre.localeCompare(b.nombre))
+        .map(student => `<option value="${student.nombre}">${student.nombre}</option>`)
+        .join('');
+    select.value = selectedValue;
+}
+
+function renderAdminStudentHistory(studentName) {
+    const list = document.getElementById('admin-student-history-list');
+    if (!list || !isAdminUser()) return;
+    if (!studentName) {
+        list.innerHTML = '';
+        return;
+    }
+
+    const searchName = normalizeSearchText(studentName);
+    const history = [...reports, ...draftReports]
+        .filter(report => normalizeSearchText(report.studentName) === searchName)
+        .sort((a, b) => b.timestamp - a.timestamp);
+
+    list.innerHTML = history.length ? history.map(report => `
+        <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div class="text-[10px] font-black uppercase text-indigo-600 tracking-widest">
+                ${new Date(report.timestamp).toLocaleDateString('es-AR')} · ${report.isDraft ? 'BORRADOR' : 'ENVIADO'}
+            </div>
+            <div class="text-xs mt-2 whitespace-pre-wrap text-slate-700">${report.reportText || 'Sin detalle'}</div>
+            <div class="text-[10px] mt-2 text-slate-400 uppercase">DAI: ${report.daiName || 'Sin nombre'}</div>
+        </div>
+    `).join('') : '<p class="text-xs text-slate-400">No hay reportes para este alumno.</p>';
+}
+
+function renderHistoryOptions() {
+    const select = document.getElementById('student-history-select');
+    if (!select) return;
+
+    const students = getAccessibleStudents();
+    const selectedValue = select.value;
+    select.innerHTML = '<option value="">Seleccionar alumno</option>' + students
+        .map(student => `<option value="${student.nombre}">${student.nombre}</option>`)
+        .join('');
+    select.value = selectedValue;
+}
+
+function renderSelectedStudentHistory(studentName) {
+    const list = document.getElementById('selected-student-history-list');
+    if (!list || !studentName) {
+        if (list) list.innerHTML = '';
+        return;
+    }
+
+    const searchName = normalizeSearchText(studentName);
+    const history = [...reports, ...draftReports]
+        .filter(report => normalizeSearchText(report.studentName) === searchName)
+        .sort((a, b) => b.timestamp - a.timestamp);
+
+    list.innerHTML = history.length ? history.map(report => `
+        <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div class="text-[10px] font-black uppercase text-indigo-600 tracking-widest">
+                ${new Date(report.timestamp).toLocaleDateString('es-AR')} · ${report.isDraft ? 'BORRADOR' : 'ENVIADO'}
+            </div>
+            <div class="text-xs mt-2 whitespace-pre-wrap text-slate-700">${report.reportText || 'Sin detalle'}</div>
+            <div class="text-[10px] mt-2 text-slate-400 uppercase">DAI: ${report.daiName || 'Sin nombre'}</div>
+        </div>
+    `).join('') : '<p class="text-xs text-slate-400">No hay reportes para este alumno.</p>';
 }
 
 function normalizeTimestamp(value, fallbackId = "") {
@@ -188,7 +404,7 @@ function initializeApp() {
             renderTabs();
             localStorage.setItem(`dai_active_tab_${currentUserEmail}`, tabId);
         }
-        if (activeTabId) saveTabDraft(activeTabId);
+        if (activeTabId) scheduleDraftSave(activeTabId);
     };
 
     const reportArea = document.getElementById('input-reportText');
@@ -255,7 +471,7 @@ function showLoginError(text) {
 // Cambia la pestaña activa del dashboard (Carga, Coordinación, etc.)
 function switchView(viewId) {
     const esAdmin = currentUserEmail && ADMIN_EMAILS.includes(currentUserEmail);
-    if ((viewId === 'admin' || viewId === 'monthly') && !esAdmin) {
+    if ((viewId === 'admin' || viewId === 'monthly' || viewId === 'students') && !esAdmin) {
         viewId = 'dai';
     }
 
@@ -287,6 +503,8 @@ function switchView(viewId) {
 
 // Se suscribe a las colecciones de Firestore para recibir actualizaciones automáticas
 function subscribeData() {
+    if (dataSubscriptionStarted) return;
+    dataSubscriptionStarted = true;
     const root = getDataRoot();
 
     // Escucha cambios en la colección de reportes (V40 Master Sync Engine)
@@ -376,6 +594,10 @@ function subscribeData() {
 
         render();
         renderMonthly();
+        buildDaiDirectory();
+        renderStudentAssignments();
+        renderAdminStudentOptions();
+        renderHistoryOptions();
 
         // Renderizar historial del alumno en la pestaña activa
         if (activeTabId) {
@@ -394,12 +616,18 @@ function subscribeData() {
         masterAlumnos = snap.docs.map(doc => {
             const data = doc.data();
             return {
+                id: doc.id,
                 ...data,
                 nombre: normalizeText(data.nombre || data.studentName || data.alumno),
                 school: normalizeText(data.school || data.escuela),
-                grade: normalizeText(data.grade || data.grado || data.turno)
+                grade: normalizeText(data.grade || data.grado || data.turno),
+                assignedDaiEmail: String(data.assignedDaiEmail || data.daiEmail || '').toLowerCase()
             };
         });
+        syncAssignedStudentTabs();
+        renderStudentAssignments();
+        renderAdminStudentOptions();
+        renderHistoryOptions();
         hydrateActiveStudentData();
     }, err => console.warn("Error en Alumnos:", err));
 
@@ -409,6 +637,8 @@ function subscribeData() {
             ...doc.data(),
             nombre: normalizeText(doc.data().nombre || doc.data().daiName || doc.data().dai)
         }));
+        buildDaiDirectory();
+        renderStudentAssignments();
     }, err => console.warn("Error en DAIs:", err));
 }
 
@@ -497,6 +727,13 @@ function renderStudentHistory(studentName) {
     }
 
     const normalizedStudentName = normalizeText(studentName);
+    const accessibleStudent = getAccessibleStudents().some(student =>
+        normalizeSearchText(student.nombre) === normalizeSearchText(normalizedStudentName)
+    );
+    if (!isAdminUser() && !accessibleStudent) {
+        container.classList.add('hidden');
+        return;
+    }
     const searchStudentName = normalizeSearchText(studentName);
     const matchesStudent = report => {
         const reportName = normalizeSearchText(report.studentName);
@@ -557,14 +794,14 @@ function handleSuggestion(type) {
 
     if (val.length < 1) { box.classList.add('hidden'); return; }
 
-    const list = type === 'student' ? masterAlumnos : masterDais;
+    const list = type === 'student' ? getAssignedStudents() : masterDais;
     const searchValue = normalizeSearchText(val);
     const filtered = list.filter(item => normalizeSearchText(item.nombre).includes(searchValue));
 
     if (filtered.length > 0) {
         box.innerHTML = filtered.map(item => `
             <div class="p-3 hover:bg-slate-100 cursor-pointer text-xs font-bold border-b border-slate-50" 
-                 onclick="selectItem('${type}', '${item.nombre.replace(/'/g, "\\'")}')">
+                onclick="selectItem('${type}', '${item.nombre.replace(/'/g, "\\'")}')">
                 ${item.nombre} ${type === 'student' ? `<span class="text-slate-400 font-normal">(${item.school})</span>` : ''}
             </div>
         `).join('');
@@ -576,11 +813,12 @@ function handleSuggestion(type) {
 
 function selectItem(type, name) {
     if (type === 'student') {
-        const item = masterAlumnos.find(a => a.nombre === name);
+        const item = getAssignedStudents().find(a => a.nombre === name);
+        if (!item) return;
         document.getElementById('input-studentName').value = item.nombre;
         document.getElementById('input-school').value = item.school || "";
         document.getElementById('input-grade').value = item.grade || "";
-        if (activeTabId) saveTabDraft(activeTabId);
+        if (activeTabId) scheduleDraftSave(activeTabId);
         if (typeof renderStudentHistory === 'function') setTimeout(() => renderStudentHistory(item.nombre), 50);
     } else {
         document.getElementById('input-daiName').value = name;
@@ -798,7 +1036,9 @@ function render() {
 
     const groups = {};
     // Filtrar solo los reportes de la semana actual para Coordinación
-    reports.filter(r => r.timestamp >= startTimestamp).forEach(r => {
+    reports.filter(r =>
+        (coordinationSearchText || r.timestamp >= startTimestamp) && matchesCoordinationSearch(r)
+    ).forEach(r => {
         if (!groups[r.daiName]) groups[r.daiName] = [];
         groups[r.daiName].push(r);
     });
@@ -827,6 +1067,18 @@ function render() {
 
     // Renderizar Archivo de Semanas Anteriores
     renderArchives();
+}
+
+function matchesCoordinationSearch(report) {
+    if (!coordinationSearchText) return true;
+    const search = normalizeSearchText(coordinationSearchText);
+    return normalizeSearchText(report.studentName).includes(search)
+        || normalizeSearchText(report.daiName).includes(search);
+}
+
+function filterCoordinationReports(value) {
+    coordinationSearchText = value.trim();
+    render();
 }
 
 function getWeekRangeLabel(timestamp) {
@@ -1290,6 +1542,8 @@ async function loadTabsFromFirestore() {
     const localActive = localStorage.getItem(`dai_active_tab_${currentUserEmail}`);
     const savedClosedTabs = JSON.parse(localStorage.getItem(`dai_closed_tabs_${currentUserEmail}`) || '[]');
     savedClosedTabs.forEach(tabId => closedTabIds.add(tabId));
+    const savedClosedStudents = JSON.parse(localStorage.getItem(`dai_closed_students_${currentUserEmail}`) || '[]');
+    savedClosedStudents.forEach(studentName => closedStudentNames.add(studentName));
 
     if (localTabs) {
         const savedTabs = JSON.parse(localTabs);
@@ -1310,6 +1564,7 @@ async function loadTabsFromFirestore() {
         renderTabs();
         if (activeTabId) switchTab(activeTabId);
         else if (currentTabs.length > 0) switchTab(currentTabs[0].id);
+        renderHistoryOptions();
     }
 
     // En V39+, subscribeData maneja la carga desde Firestore
@@ -1377,6 +1632,13 @@ function clearReportForm() {
     renderTabs();
 }
 
+function scheduleDraftSave(tabId) {
+    window.clearTimeout(draftSaveTimer);
+    draftSaveTimer = window.setTimeout(() => {
+        saveTabDraft(tabId);
+    }, 900);
+}
+
 // Cambia entre las pestañas de alumnos
 function switchTab(tabId) {
     // Guarda el contenido actual antes de cambiar a otra pestaña para no perder datos
@@ -1434,6 +1696,11 @@ async function confirmRemoveTab() {
 
     closedTabIds.add(tabId);
     localStorage.setItem(`dai_closed_tabs_${currentUserEmail}`, JSON.stringify([...closedTabIds]));
+    const tabBeingRemoved = currentTabs.find(tab => tab.id === tabId);
+    if (tabBeingRemoved?.studentName) {
+        closedStudentNames.add(normalizeSearchText(tabBeingRemoved.studentName));
+        localStorage.setItem(`dai_closed_students_${currentUserEmail}`, JSON.stringify([...closedStudentNames]));
+    }
 
     // Actualiza la interfaz inmediatamente (Optimistic UI)
     currentTabs = currentTabs.filter(t => t.id !== tabId);
@@ -1484,6 +1751,8 @@ async function saveTabDraft(tabId) {
     // Guardado local inmediato para que no se pierda nada si se cierra el navegador
     localStorage.setItem(`dai_tabs_${currentUserEmail}`, JSON.stringify(currentTabs));
 
+    if (Date.now() < firestoreQuotaBlockedUntil) return true;
+
     // V43: NO GUARDAR EN FIRESTORE SI ESTÁ VACÍO
     // Solo sincronizar si tiene al menos un nombre de alumno o algo de texto
     const shouldSync = tab.studentName && tab.studentName !== "NUEVO_ALUMNO";
@@ -1492,6 +1761,15 @@ async function saveTabDraft(tabId) {
         console.log("Pestaña vacía, solo guardado local");
         return true;
     }
+
+    const signature = JSON.stringify({
+        daiName: document.getElementById('input-daiName')?.value || "USUARIO",
+        studentName: tab.studentName,
+        school: tab.school || "",
+        grade: tab.grade || "",
+        reportText: tab.reportText || ""
+    });
+    if (savedDraftSignatures.get(tabId) === signature) return true;
 
     try {
         const root = getDataRoot();
@@ -1511,6 +1789,7 @@ async function saveTabDraft(tabId) {
             tabId: tabId,
             timestamp: Date.now()
         }, { merge: true });
+        savedDraftSignatures.set(tabId, signature);
 
         // Muestra el pequeño mensaje de "Sincronizado"
         const syncMsg = document.getElementById('sync-msg');
@@ -1521,6 +1800,9 @@ async function saveTabDraft(tabId) {
     } catch (e) {
         console.error("Error guardando borrador en Firebase (V38):", e);
         lastDraftSaveError = e;
+        if (e.code === 'resource-exhausted') {
+            firestoreQuotaBlockedUntil = Date.now() + 10 * 60 * 1000;
+        }
         return false;
     }
 
@@ -1540,7 +1822,12 @@ async function saveCurrentProgress() {
             btn.disabled = true;
             btn.innerText = "GUARDANDO...";
         }
+        window.clearTimeout(draftSaveTimer);
         const saved = await saveTabDraft(activeTabId);
+        if (Date.now() < firestoreQuotaBlockedUntil) {
+            showNotification('Progreso guardado localmente. Se sincronizará cuando Firebase libere la cuota.');
+            return;
+        }
         if (!saved) {
             const errorCode = lastDraftSaveError?.code || "unknown-error";
             const errorMessage = lastDraftSaveError?.message || "No se pudo escribir el borrador.";
@@ -1581,6 +1868,18 @@ function actualizarInterfazPorRol(email) {
 
     const btnProfile = document.getElementById('btn-profile');
     if (btnProfile) btnProfile.classList.remove('hidden');
+
+    const btnStudents = document.getElementById('btn-students');
+    if (btnStudents) btnStudents.classList.toggle('hidden', !esAdmin);
+
+    const btnHistory = document.getElementById('btn-history');
+    if (btnHistory) btnHistory.classList.remove('hidden');
+
+    const studentInput = document.getElementById('input-studentName');
+    if (studentInput) studentInput.readOnly = !esAdmin;
+
+    const plusButton = document.querySelector('#tabs-container > button[onclick="addNewStudentTab()"]');
+    if (plusButton) plusButton.classList.toggle('hidden', !esAdmin);
 }
 
 // Inicia la aplicación al cargar la ventana
