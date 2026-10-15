@@ -24,15 +24,37 @@ service cloud.firestore {
         && resource.data.userEmail == request.auth.token.email;
     }
 
+    function isAssignedStudent(appId, studentId) {
+      return signedIn()
+        && studentId is string
+        && studentId.size() > 0
+        && get(/databases/$(database)/documents/artifacts/$(appId)/public/data/master_alumnos/$(studentId)).data.assignedDaiEmail == request.auth.token.email;
+    }
+
+    function isAssignedReport(appId, reportData) {
+      return isAssignedStudent(appId, reportData.studentId)
+        && reportData.assignedDaiEmail == request.auth.token.email;
+    }
+
     match /artifacts/{appId}/public/data/reports/{reportId} {
-      allow read: if signedIn();
-      allow create: if ownsNewData();
-      allow update: if ownsNewData() || isAdmin();
-      allow delete: if isAdmin() || (ownsExistingData() && resource.data.isDraft == true);
+      allow read: if isAdmin()
+        || (signedIn() && resource.data.isDraft == true && ownsExistingData())
+        || (signedIn() && resource.data.assignedDaiEmail == request.auth.token.email);
+      allow create: if isAdmin()
+        || (ownsNewData() && (request.resource.data.isProfile == true
+          || isAssignedReport(appId, request.resource.data)));
+      allow update: if isAdmin()
+        || (ownsExistingData() && resource.data.isDraft == true
+          && request.resource.data.userEmail == request.auth.token.email
+          && isAssignedReport(appId, request.resource.data));
+      allow delete: if isAdmin()
+        || (ownsExistingData() && resource.data.isDraft == true
+          && isAssignedReport(appId, resource.data));
     }
 
     match /artifacts/{appId}/public/data/master_alumnos/{studentId} {
-      allow read: if signedIn();
+      allow read: if isAdmin()
+        || (signedIn() && resource.data.assignedDaiEmail == request.auth.token.email);
       allow create: if signedIn()
         && !request.resource.data.keys().hasAny(['assignedDaiEmail', 'daiEmail']);
       allow update: if isAdmin()
@@ -46,7 +68,7 @@ service cloud.firestore {
     }
 
     match /artifacts/{appId}/public/data/user_profiles/{userEmail} {
-      allow read: if signedIn();
+      allow read: if isAdmin() || (signedIn() && userEmail == request.auth.token.email);
       allow write: if signedIn() && userEmail == request.auth.token.email;
     }
   }
